@@ -1,0 +1,11 @@
+Branch-position justification (paper-aligned implementation)
+===========================================================
+
+Interpretation: Q/R is not assigned by image coordinates. Both candidates are
+built at every selected determinant-valid block, and the stored-domain local
+robustness/distortion score chooses the branch. The spatial-grid statistics below
+are therefore a sanity check for broad spatial use, not a new selection rule.
+
+girl: Q=4906 (39.93%), R=7382 (60.07%); Q appears in 16/16 grid cells, R appears in 16/16 grid cells.
+
+Excluded manhattan: Host is determinant-ineligible: 5338 eligible 4x4 blocks, but 12288 are required for payload=4096, r=3.

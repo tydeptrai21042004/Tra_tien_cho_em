@@ -1,0 +1,5 @@
+attack,losses_nc,mean_delta_ber_vs_full,mean_delta_nc_vs_full,median_delta_nc_vs_full,paired_n,ties_nc,variant,wins_nc,worst_delta_nc_vs_full
+clean,0,0.0,0.0,0.0,1,1,raw_score,0,0.0
+jpeg_q50,0,0.0,0.0037144831490725505,0.0037144831490725505,1,0,raw_score,1,0.0037144831490725505
+clean,0,0.0,0.0,0.0,1,1,repeat_1,0,0.0
+jpeg_q50,1,0.01025390625,-0.05187216018906568,-0.05187216018906568,1,0,repeat_1,0,-0.05187216018906568

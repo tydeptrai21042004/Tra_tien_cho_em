@@ -1,0 +1,2 @@
+image,reason
+manhattan,"Host is determinant-ineligible: 5338 eligible 4x4 blocks, but 12288 are required for payload=4096, r=3."
