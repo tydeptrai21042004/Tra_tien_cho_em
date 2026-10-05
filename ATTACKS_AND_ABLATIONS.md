@@ -1,27 +1,26 @@
-# Experimental design notes
+# Candidate comparison and later ablation
 
-## Why the ablation is stronger
+## Candidate stage
 
-The ablation is organized by **mechanism**, so each row answers a specific methodological question.
+The ten methods are **competing proposal formulations**, not components of one adaptive Q/R method. Run all methods with the same data and `repeat=1`.
 
-| Variant | Removed/replaced mechanism | Question tested |
-|---|---|---|
-| full | nothing | Reference proposal |
-| q_only | R branch + adaptive selection | Is Q alone sufficient? |
-| r_only | Q branch + adaptive selection | Is R alone sufficient? |
-| distortion_only | robustness-aware score | Does robustness information improve branch choice? |
-| robustness_only | distortion normalization | Is the distortion term necessary for imperceptibility/selection balance? |
-| raw_score | perturbation ensemble | Does local perturbation testing add robustness? |
-| no_safe_margin | explicit Q/R margins | Do safety margins protect decoding? |
-| hard_vote | soft reliability magnitudes | Does soft evidence improve repeated decoding? |
-| raw_decoder | denoised candidates and confidence selection | Does confidence-guided decoder adaptation help? |
-| fixed_mild_decoder | confidence selection | Is selecting among candidates better than always denoising? |
-| repeat_1 | repeated embedding | What robustness is contributed by repetition? |
+Suggested selection order:
 
-The generated paired-delta CSV is particularly useful for a paper because every ablated result is compared with `full` on the same host, watermark, and attack.
+1. require mean PSNR > 50 dB;
+2. require clean NC = 1 where possible;
+3. maximize hard-attack mean NC;
+4. then maximize global attacked mean NC;
+5. use worst-attack NC and BER as tie-breakers.
 
-## Attack profiles
+`run_candidate_comparison.py --sweep --screening` uses a compact first-stage set including clean, JPEG, noise, blur, scaling and crop. After selecting one or two strengths per method, use the extended/stress profiles.
 
-`paper` preserves the attack settings currently described in the manuscript. `representative` is deliberately compact for ablation. `extended` broadens attack *types*. `stress` additionally broadens *severity levels*.
+## Geometric attacks
 
-Do not mix results from different profiles into one average without reporting which attacks were included.
+The attack module now keeps round-trip rotation/translation only as interpolation diagnostics and also provides true one-way rotations/translations. One-way geometry is an unsynchronised attack; do not label a round-trip attack as ordinary rotation robustness.
+
+## Ablation stage
+
+Do **not** use the deleted adaptive-branch ablations. After the winning carrier is known, create an ablation around that specific method. Examples:
+
+- Q winner: remove normalization/guard, replace Givens update with a simpler update, compare angular/lattice formulation, then study repetition separately.
+- R winner: compare projection vectors, direct single-coefficient QIM, repeated row observations, normalized/relative feature, then study repetition separately.

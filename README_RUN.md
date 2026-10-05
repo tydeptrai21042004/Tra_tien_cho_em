@@ -1,186 +1,88 @@
-# Paper-aligned QR watermarking code + bundled data
+# Q-only / R-only QR watermark candidate code
 
-This package is self-contained. It contains the paper-aligned Python implementation, the host/watermark data copied unchanged from the supplied repository ZIP, a stronger component ablation, a branch-position justification experiment, and expanded deterministic attack suites.
+This patch **removes the old adaptive two-branch `|q44|` / `r44` proposal**. A run now uses one fixed method for all selected blocks, with no `choose_branch()` logic and no per-block Q/R flags.
 
-## Bundled data
+## Ten candidate methods
 
-### Host images
-`data/hosts/classical/`
+Q-only, based on `q21,q31`:
 
-- `airplane.bmp`
-- `girl.bmp`
-- `lenna.bmp`
-- `manhattan.bmp`
-- `pepper.bmp`
-- `safari.bmp`
+- `q_gaqim` — Givens Angular QIM
+- `q_npm` — Normalized Pair-Margin
+- `q_lrm` — Log-Ratio Margin
+- `q_lqim` — 2-D Pair Lattice QIM
+- `q_smm` — Symmetric Minimum-Margin
 
-### Watermark images
-`data/watermarks/`
+R-only, based on the first row of `R`:
 
-- `watermark_1.png`
-- `watermark_2.png`
+- `r_spqim` — Spread/Projection Row QIM on `r12,r13,r14`
+- `r_ndqim` — Normalized Differential QIM
+- `r_lrqim` — Log-Ratio Row QIM
+- `r_rqim` — Repeated First-Row QIM on `r12,r13,r14`
+- `r_aqim` — Adaptive-Step First-Row QIM on `r11:r14`
 
-The scripts load the watermarks as binary 64×64 payloads. Manhattan is intentionally included even though the paper-aligned capacity test rejects it for the 4096-bit, `r=3` configuration; this makes the exclusion reproducible.
+The R scalar primitive follows the supplied formula exactly: target modulo positions are `0.75*S` for bit 1 and `0.25*S` for bit 0; extraction thresholds at `0.5*S`.
 
-## Paper-aligned implementation
-
-`proposal_method.py` follows the manuscript method:
-
-- blue-channel, non-overlapping 4×4 blocks;
-- determinant gate `|det(A)| > 1e-8` before QR;
-- nominal odd repetition factor (`r=3` for 512×512 host and 64×64 watermark);
-- key-dependent chaotic ordering of determinant-eligible blocks;
-- canonical QR with non-negative diagonal of `R`;
-- Q branch based on `|q44|` and a 4×4 Givens rotation;
-- R branch based on `r44 mod q` and the positive QIM codebook;
-- branch selection after round/clip in the actual stored-pixel domain;
-- robustness score from raw / mean / worst local perturbation margins;
-- final score `robustness / (distortion + eps)`;
-- semi-blind side information storing selected block coordinates and Q/R flags;
-- repeated soft-decision recovery;
-- raw, NLM h=3, and NLM h=7 extraction candidates selected by global confidence.
-
-## Stronger ablation
-
-`run_ablation.py` now isolates eleven versions:
-
-1. `full` — complete proposal.
-2. `q_only` — removes adaptive dual-branch selection and always uses Q.
-3. `r_only` — removes adaptive dual-branch selection and always uses R.
-4. `distortion_only` — branch decision ignores robustness.
-5. `robustness_only` — branch decision ignores distortion normalization.
-6. `raw_score` — removes the local perturbation ensemble.
-7. `no_safe_margin` — sets both Q/R safety margins to zero.
-8. `hard_vote` — replaces soft reliability accumulation with ±1 hard votes.
-9. `raw_decoder` — removes NLM candidates / confidence-guided decoder selection.
-10. `fixed_mild_decoder` — always uses mild NLM instead of confidence selection.
-11. `repeat_1` — removes repetition and uses one observation per payload bit.
-
-The runner writes:
-
-- raw per-host / per-watermark / per-attack results;
-- `*_summary.csv` with mean, standard deviation, minimum NC and BER statistics;
-- `*_delta_vs_full.csv` with paired NC/BER changes against the complete method plus win/tie/loss counts.
-
-Recommended full ablation:
+## 1. Smoke test
 
 ```bash
-python run_ablation.py --repo . --attack-profile representative
+python smoke_test_10_methods.py
 ```
 
-Clean-only ablation:
+## 2. Compare all ten at their defaults
 
 ```bash
-python run_ablation.py --repo . --clean-only
+python run_candidate_comparison.py --quick
 ```
 
-Fast smoke test:
+## 3. First-stage strength screening
 
 ```bash
-python run_ablation.py --repo . --quick
+python run_strength_screen.py
 ```
 
-To make the ablation much heavier, use:
+This performs method-specific strength sweeps and writes:
+
+- `validation/strength_screen.csv`
+- `validation/strength_screen_summary.csv`
+- `validation/strength_screen_best_per_method.csv`
+
+Feasibility is reported using mean PSNR > 50 dB and clean NC approximately 1 by default.
+
+## 4. Full comparison after screening
+
+Use the selected strengths with `run_attack_suite.py`, for example:
 
 ```bash
-python run_ablation.py --repo . --attack-profile extended
+python run_attack_suite.py --method q_gaqim --strength 0.75 --profile extended \
+  --out validation/q_gaqim_extended.csv
 ```
 
-or:
+or run a broad candidate sweep:
 
 ```bash
-python run_ablation.py --repo . --attack-profile stress
+python run_candidate_comparison.py --sweep --profile extended \
+  --out validation/candidate_extended.csv
 ```
 
-## Expanded attack suite
-
-`attacks.py` provides four deterministic profiles:
-
-- `paper`: 12 cases including clean + the manuscript attack settings.
-- `representative`: 12 diverse cases intended for component ablation.
-- `extended`: 34 cases.
-- `stress`: 52 cases with multiple severity levels.
-
-The attack families now include:
-
-- Gaussian blur;
-- average filtering;
-- median filtering;
-- bilateral filtering;
-- sharpening;
-- Gaussian noise;
-- speckle noise;
-- salt-and-pepper noise;
-- JPEG at multiple quality levels;
-- JPEG2000;
-- low-pass filtering;
-- scale down/up at multiple factors;
-- rotation and inverse rotation, including small-angle and 45° conditions;
-- translation and inverse translation;
-- center crop followed by resize-back;
-- gamma correction;
-- brightness changes;
-- contrast changes;
-- random occlusion at several proportions.
-
-Run the complete proposal against the extended suite:
-
-```bash
-python run_attack_suite.py --repo . --profile extended
-```
-
-Run the 52-case stress suite:
-
-```bash
-python run_attack_suite.py --repo . --profile stress
-```
-
-The attack runner produces both a raw CSV and an attack-level summary CSV.
-
-## Branch-position justification
-
-```bash
-python run_branch_position_justification.py --repo .
-```
-
-This records branch coordinates, local image features, branch scores, and 4×4 spatial-grid Q/R occupancy. It is intended to support the paper argument that branch choice is driven by local candidate quality rather than a hard-coded spatial region.
-
-## Single-image commands
-
-Clean benchmark:
-
-```bash
-python proposal_method.py clean-benchmark \
-  --host data/hosts/classical/girl.bmp \
-  --watermark data/watermarks/watermark_1.png
-```
-
-Embed:
+## 5. Single-image embed / extract
 
 ```bash
 python proposal_method.py embed \
-  --host data/hosts/classical/girl.bmp \
+  --method r_rqim --strength 6 \
+  --host data/hosts/classical/airplane.bmp \
   --watermark data/watermarks/watermark_1.png \
-  --output outputs/watermarked_girl.png \
-  --side-info outputs/girl_side_info.npz \
-  --diagnostics outputs/girl_branch_diagnostics.csv
-```
+  --output watermarked.png --side-info side_info.npz
 
-Extract:
-
-```bash
 python proposal_method.py extract \
-  --watermarked outputs/watermarked_girl.png \
-  --side-info outputs/girl_side_info.npz \
-  --output outputs/extracted_girl.png
+  --method r_rqim --strength 6 \
+  --watermarked watermarked.png --side-info side_info.npz \
+  --output extracted.png
 ```
 
-## Install
+The side-information file stores coordinates and the run-level method/strength, but **does not store Q/R branch flags**. The current comparison remains semi-blind because block coordinates are stored; do not call it fully blind unless coordinate regeneration is redesigned separately.
 
-```bash
-pip install -r requirements.txt
-```
+## Fair comparison rules
 
-## Reproducibility notes
+For the carrier search, keep `repeat=1` so every bit uses one selected 4x4 block. This prevents R-RQIM's three within-block observations from being compounded with hidden across-block repetition. Use the same hosts, watermarks, selected positions, attacks, and metrics for every candidate.
 
-All stochastic attacks use fixed seeds. Attack output sizes remain identical to the watermarked host so stored semi-blind block coordinates remain well-defined. The code records attack failures (for example, a platform lacking JPEG2000 support) instead of silently dropping them.
+The candidate search is not an ablation study. First choose the winning carrier under the PSNR/clean-NC constraints; then construct an ablation specifically around that winner.
