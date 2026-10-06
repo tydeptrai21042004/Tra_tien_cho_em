@@ -26,6 +26,13 @@ and extraction compares mod(x,S) with 0.5*S.
 
 The comparison protocol is semi-blind because selected block coordinates are
 stored.  There are no per-block Q/R branch flags anymore.
+
+Robust-v3 changes keep exactly the same ten Q-only/R-only carriers, while
+adding carrier-stability block selection, host-normalized margin allocation for
+the sign/margin Q family, stronger stored-domain guard closure, and an optional
+carrier-conformity self-synchronizer for small rotation/translation/crop-scale
+misalignment.  The synchronizer uses the watermark carrier itself: no Q/R
+hybrid branch, pilot band, ECC, or attack classifier is introduced.
 """
 from __future__ import annotations
 
@@ -78,23 +85,57 @@ class MethodConfig:
     eps: float = 1e-9
 
     # Q-family strengths
-    q_angle_step_deg: float = 1.5
-    q_margin: float = 0.01
-    q_log_margin: float = 0.02
+    # Robust defaults.  These remain below/near the PSNR=50 screening budget
+    # on the bundled data; the sweep runner should still be used for final tuning.
+    q_angle_step_deg: float = 3.0
+    q_margin: float = 0.007
+    q_log_margin: float = 0.013
     q_lattice_step: float = 0.02
 
     # R-family strengths
-    r_step: float = 8.0
+    r_step: float = 16.0
     r_norm_step: float = 0.04
     r_log_step: float = 0.06
-    r_alpha: float = 0.035
-    r_s_min: float = 2.0
-    r_s_max: float = 16.0
+    r_alpha: float = 0.40
+    r_s_min: float = 4.0
+    r_s_max: float = 20.0
     r_projection: str = "balanced"  # balanced | average
     aqim_rounds: int = 3
 
-    # Extraction
+    # Integer-domain closure / extraction.  QR is re-estimated after the
+    # floating block is rounded to uint8, so clean decoding must be checked in
+    # the stored domain rather than assumed from the pre-rounding carrier.
     soft_vote: bool = True
+    closure_rounds: int = 4
+    # Sign/margin Q methods benefit from a deep stored-domain guard.  Periodic
+    # QIM carriers have a natural |evidence| target near one and therefore use
+    # q_periodic_guard instead.
+    q_sign_guard: float = 2.0
+    q_periodic_guard: float = 0.80
+    r_closure_guard: float = 0.80
+    q_integer_repair_radius: int = 10
+
+    # Robust carrier selection.  "stability" keeps the same q21/q31 or R-row
+    # carrier, but chooses the payload blocks whose carrier changes least under
+    # a fixed weak perturbation bank.  It is bit-independent and stores no new
+    # per-bit flag.
+    block_selection: str = "stability"   # stability | chaotic
+    stability_margin_boost: float = 0.80
+    stability_reference_quantile: float = 0.90
+
+    # Optional self-synchronisation at extraction.  This is a decoder wrapper,
+    # not a second embedding band.  Keep "none" for a strict no-search study;
+    # use "auto" when maximum geometric robustness is desired.
+    sync_mode: str = "none"              # none | auto
+    sync_sample_stride: int = 4
+    sync_accept_score: float = 0.52
+    sync_accept_ratio: float = 1.35
+    sync_translation_radius: int = 8
+    sync_translation_step: int = 2
+    sync_rotation_deg: float = 5.0
+    sync_rotation_step_deg: float = 1.0
+    sync_scale_min: float = 0.85
+    sync_scale_step: float = 0.025
 
 
 @dataclass
@@ -121,26 +162,35 @@ def validate_config(cfg: MethodConfig) -> None:
         raise ValueError("This implementation requires 4x4 QR blocks")
     if int(cfg.repetition_override) < 1:
         raise ValueError("repetition_override must be >= 1")
+    if cfg.block_selection not in {"stability", "chaotic"}:
+        raise ValueError("block_selection must be 'stability' or 'chaotic'")
+    if cfg.sync_mode not in {"none", "auto"}:
+        raise ValueError("sync_mode must be 'none' or 'auto'")
 
 
 def method_strength_grid(method: str) -> List[float]:
-    """Recommended first-pass search grid for each candidate."""
+    """Robustness-oriented search grid under a PSNR constraint.
+
+    The old grids were too weak for several carriers (especially Q-GAQIM and
+    R-RQIM), leaving a large unused distortion budget.  The runner still
+    filters by mean PSNR and clean NC, so stronger points are safe to include.
+    """
     if method == "q_gaqim":
-        return [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
+        return [1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0]
     if method in {"q_npm", "q_smm"}:
-        return [0.005, 0.01, 0.015, 0.02, 0.03, 0.04, 0.05]
+        return [0.004, 0.006, 0.008, 0.010, 0.012, 0.015, 0.020, 0.030]
     if method == "q_lrm":
-        return [0.02, 0.04, 0.06, 0.08, 0.10, 0.15, 0.20]
+        return [0.008, 0.010, 0.012, 0.015, 0.020, 0.030, 0.040, 0.060]
     if method == "q_lqim":
-        return [0.01, 0.015, 0.02, 0.03, 0.04, 0.05, 0.06]
+        return [0.010, 0.015, 0.020, 0.030, 0.040, 0.050, 0.060]
     if method in {"r_spqim", "r_rqim"}:
-        return [2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 16.0]
+        return [6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0]
     if method == "r_ndqim":
-        return [0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.16]
+        return [0.03, 0.04, 0.06, 0.08, 0.10, 0.12, 0.16, 0.20]
     if method == "r_lrqim":
-        return [0.04, 0.06, 0.08, 0.10, 0.12, 0.16, 0.20]
+        return [0.04, 0.06, 0.08, 0.10, 0.12, 0.16, 0.20, 0.24]
     if method == "r_aqim":
-        return [0.010, 0.015, 0.020, 0.025, 0.030, 0.040, 0.050]
+        return [0.20, 0.30, 0.40, 0.50, 0.60, 0.80, 1.00, 1.20]
     raise ValueError(method)
 
 
@@ -265,6 +315,152 @@ def eligible_blocks(channel: np.ndarray, cfg: MethodConfig) -> List[Tuple[int, i
         if determinant_valid(channel[r:r + bs, c:c + bs], cfg.det_eps):
             out.append((r, c))
     return out
+
+
+
+# ----- Robust-v3 carrier-stability block selection ------------------------
+
+_STABILITY_CACHE: Dict[Tuple[str, str, int, str], Tuple[List[Tuple[int, int]], Dict[Tuple[int, int], float], float]] = {}
+
+
+def _channel_cache_key(channel: np.ndarray) -> str:
+    # Small deterministic digest; avoids recomputing the same stability plan
+    # across two watermarks or a strength sweep on the same host.
+    return hashlib.blake2b(np.ascontiguousarray(channel, dtype=np.uint8).tobytes(), digest_size=12).hexdigest()
+
+
+def _gray_jpeg(channel: np.ndarray, quality: int = 70) -> np.ndarray:
+    u = np.clip(np.rint(channel), 0, 255).astype(np.uint8)
+    ok, buf = cv2.imencode(".jpg", u, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+    if not ok:
+        return u.astype(np.float64)
+    dec = cv2.imdecode(buf, cv2.IMREAD_GRAYSCALE)
+    return (u if dec is None else dec).astype(np.float64)
+
+
+def _scale_gray(channel: np.ndarray, factor: float = 0.75) -> np.ndarray:
+    h, w = channel.shape
+    u = np.clip(np.rint(channel), 0, 255).astype(np.uint8)
+    nw, nh = max(1, int(round(w * factor))), max(1, int(round(h * factor)))
+    tmp = cv2.resize(u, (nw, nh), interpolation=cv2.INTER_AREA)
+    return cv2.resize(tmp, (w, h), interpolation=cv2.INTER_CUBIC).astype(np.float64)
+
+
+def _q_pair_from_spatial_block(block: np.ndarray, eps: float) -> Tuple[float, float]:
+    # With canonical R11 >= 0, Q[:,0] is simply the normalized first spatial
+    # column.  Avoiding a full QR here makes stability screening much faster.
+    col = np.asarray(block[:, 0], dtype=np.float64)
+    n = float(np.linalg.norm(col))
+    if n <= eps:
+        return 0.0, 0.0
+    q1 = col / n
+    return float(q1[1]), float(q1[2])
+
+
+def _raw_carrier_feature(block: np.ndarray, cfg: MethodConfig) -> np.ndarray:
+    if cfg.method in Q_METHODS:
+        x, y = _q_pair_from_spatial_block(block, cfg.eps)
+        if cfg.method == "q_gaqim":
+            th = math.atan2(y, x)
+            return np.asarray([math.cos(th), math.sin(th)], dtype=np.float64)
+        if cfg.method == "q_npm":
+            return np.asarray([(x - y) / (math.hypot(x, y) + cfg.eps)], dtype=np.float64)
+        if cfg.method == "q_lrm":
+            return np.asarray([math.log(abs(x) + cfg.eps) - math.log(abs(y) + cfg.eps)], dtype=np.float64)
+        if cfg.method == "q_smm":
+            return np.asarray([x - y], dtype=np.float64)
+        if cfg.method == "q_lqim":
+            return np.asarray([x, y], dtype=np.float64)
+    q, r = canonical_qr(block)
+    if cfg.method == "r_spqim":
+        a = _r_projection_vector(cfg)
+        return np.asarray([float(np.dot(a, r[0, 1:4]))], dtype=np.float64)
+    if cfg.method == "r_ndqim":
+        return np.asarray([_normdiff(float(r[0, 1]), float(r[0, 2]), cfg.eps)], dtype=np.float64)
+    if cfg.method == "r_lrqim":
+        return np.asarray([_logratio(float(r[0, 1]), float(r[0, 2]), cfg.eps)], dtype=np.float64)
+    if cfg.method == "r_rqim":
+        v = r[0, 1:4].astype(np.float64)
+        return v / (float(np.linalg.norm(v)) + cfg.eps)
+    if cfg.method == "r_aqim":
+        v = r[0, 0:4].astype(np.float64)
+        return v / (float(np.linalg.norm(v)) + cfg.eps)
+    raise ValueError(cfg.method)
+
+
+def _stability_select_blocks(
+    channel: np.ndarray,
+    positions: Sequence[Tuple[int, int]],
+    required: int,
+    cfg: MethodConfig,
+) -> Tuple[List[Tuple[int, int]], Dict[Tuple[int, int], float], float]:
+    if cfg.block_selection == "chaotic":
+        # Preserve the original keyed random subset when robust stability
+        # screening is disabled.  A second keyed permutation below only changes
+        # the payload order inside the already-selected subset.
+        selected = chaotic_permute_positions(positions, cfg.private_key)[:required]
+        return selected, {p: 0.0 for p in selected}, 1.0
+
+    key = (_channel_cache_key(channel), cfg.method, int(required), cfg.r_projection)
+    cached = _STABILITY_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    # Fixed weak probes estimate carrier sensitivity without selecting an attack
+    # at extraction time.  The same bank is used for every image/method.
+    probes = [
+        cv2.GaussianBlur(channel.astype(np.float32), (0, 0), 0.5).astype(np.float64),
+        _gray_jpeg(channel, 70),
+        _scale_gray(channel, 0.75),
+    ]
+    bs = cfg.block_size
+    scored: List[Tuple[float, int, int]] = []
+    for rr, cc in positions:
+        try:
+            f0 = _raw_carrier_feature(channel[rr:rr+bs, cc:cc+bs], cfg)
+            drifts = []
+            for probe in probes:
+                fp = _raw_carrier_feature(probe[rr:rr+bs, cc:cc+bs], cfg)
+                drifts.append(float(np.linalg.norm(fp - f0)))
+            drift = float(np.mean(drifts))
+        except (ValueError, np.linalg.LinAlgError, FloatingPointError, OverflowError):
+            drift = math.inf
+        scored.append((drift, int(rr), int(cc)))
+    scored.sort(key=lambda z: z[0])
+    chosen = scored[:required]
+    selected = [(rr, cc) for _, rr, cc in chosen]
+    score_map = {(rr, cc): float(d) for d, rr, cc in chosen}
+    finite = np.asarray([d for d, _, _ in chosen if np.isfinite(d)], dtype=np.float64)
+    if finite.size:
+        q = float(np.clip(cfg.stability_reference_quantile, 0.5, 1.0))
+        drift_ref = max(float(np.quantile(finite, q)), cfg.eps)
+    else:
+        drift_ref = 1.0
+    out = (selected, score_map, drift_ref)
+    _STABILITY_CACHE[key] = out
+    return out
+
+
+def _adaptive_block_cfg(cfg: MethodConfig, drift: float, drift_ref: float) -> MethodConfig:
+    # These three Q methods decode by sign; therefore the embedder may allocate
+    # a larger margin to less-stable blocks without transmitting a per-block
+    # strength.  The multiplier is normalized per host to avoid runaway strength
+    # on difficult images.
+    u = float(np.clip(float(drift) / max(float(drift_ref), cfg.eps), 0.0, 1.0))
+    mult = 1.0 + float(cfg.stability_margin_boost) * u
+    if cfg.method in {"q_smm", "q_npm"}:
+        return replace(cfg, q_margin=float(cfg.q_margin) * mult)
+    if cfg.method == "q_lrm":
+        return replace(cfg, q_log_margin=float(cfg.q_log_margin) * mult)
+    return cfg
+
+
+def _closure_guard_for_method(cfg: MethodConfig) -> float:
+    if cfg.method in {"q_smm", "q_npm", "q_lrm"}:
+        return float(cfg.q_sign_guard)
+    if cfg.method in {"q_gaqim", "q_lqim"}:
+        return float(cfg.q_periodic_guard)
+    return float(cfg.r_closure_guard)
 
 
 def _chaotic_order_count(n: int, key: str) -> np.ndarray:
@@ -626,18 +822,20 @@ def _r_rqim_evidence(r: np.ndarray, cfg: MethodConfig) -> float:
 
 
 def _adaptive_r_step(r: np.ndarray, cfg: MethodConfig) -> float:
-    energy = float(np.linalg.norm(r[0, 0:4]))
+    # Use the trailing 3x3 triangular part as the scale reference.  The R-only
+    # embedder changes only row 1, so this reference is invariant before pixel
+    # rounding and substantially more stable than deriving S from the row that
+    # is itself being quantized.
+    energy = float(np.linalg.norm(r[1:, 1:]))
     return float(np.clip(cfg.r_alpha * energy, cfg.r_s_min, cfg.r_s_max))
 
 
 def _r_aqim_embed(q: np.ndarray, r: np.ndarray, bit: int, cfg: MethodConfig) -> Tuple[np.ndarray, float]:
     r2 = r.copy()
     before = r2[0, 0:4].copy()
-    # Fixed-point rounds make the received-row-derived S closer to the embed S.
-    for _ in range(max(1, int(cfg.aqim_rounds))):
-        step = _adaptive_r_step(r2, cfg)
-        for j in (0, 1, 2, 3):
-            r2[0, j] = binary_qim_embed(float(r2[0, j]), bit, step)
+    step = _adaptive_r_step(r, cfg)
+    for j in (0, 1, 2, 3):
+        r2[0, j] = binary_qim_embed(float(r2[0, j]), bit, step)
     return q @ r2, float(np.linalg.norm(r2[0, 0:4] - before))
 
 
@@ -683,6 +881,116 @@ def _stored_block(block: np.ndarray) -> np.ndarray:
     return np.clip(np.rint(block), 0, 255).astype(np.uint8)
 
 
+def _q_evidence_from_first_column(col: np.ndarray, cfg: MethodConfig) -> float:
+    """Evaluate the q21/q31 carrier directly from the spatial first column.
+
+    Under canonical QR with R11 >= 0, the first column of Q is the normalized
+    first spatial column.  This identity makes the post-rounding repair both
+    exact for the chosen Q feature and much cheaper than repeating QR hundreds
+    of times during a local integer search.
+    """
+    v = np.asarray(col, dtype=np.float64).reshape(-1)
+    n = float(np.linalg.norm(v))
+    if n <= cfg.eps:
+        return 0.0
+    q1 = v / n
+    x, y = float(q1[1]), float(q1[2])
+    if cfg.method == "q_gaqim":
+        step = math.radians(cfg.q_angle_step_deg)
+        theta = math.atan2(y, x)
+        d0 = _circular_distance(theta, _nearest_coset(theta, step, 0))
+        d1 = _circular_distance(theta, _nearest_coset(theta, step, 1))
+        return (d0 - d1) / max(0.5 * step, cfg.eps)
+    if cfg.method == "q_npm":
+        return ((x - y) / (math.hypot(x, y) + cfg.eps)) / max(cfg.q_margin, cfg.eps)
+    if cfg.method == "q_lrm":
+        return (math.log(abs(x) + cfg.eps) - math.log(abs(y) + cfg.eps)) / max(cfg.q_log_margin, cfg.eps)
+    if cfg.method == "q_smm":
+        return (x - y) / max(cfg.q_margin, cfg.eps)
+    if cfg.method == "q_lqim":
+        pair = np.asarray([x, y], dtype=np.float64)
+        _, d0 = _nearest_pair_lattice_point(pair, cfg.q_lattice_step, 0)
+        _, d1 = _nearest_pair_lattice_point(pair, cfg.q_lattice_step, 1)
+        return (d0 - d1) / max(0.5 * cfg.q_lattice_step, cfg.eps)
+    raise ValueError(cfg.method)
+
+
+def _repair_q_integer_carrier(stored: np.ndarray, bit: int, cfg: MethodConfig) -> np.ndarray:
+    """Smallest local integer repair of the recovered q21/q31 decision.
+
+    The floating Q-domain update can move back across a decision boundary when
+    Q@R is rounded to uint8.  Search only the two first-column samples that
+    determine q21 and q31, in increasing squared-distance order, and stop at
+    the first candidate meeting the requested guard.  No extra side information
+    is stored and the extractor uses the same original carrier rule.
+    """
+    if cfg.method not in Q_METHODS:
+        return stored
+    sign = 1.0 if int(bit) else -1.0
+    guard = _closure_guard_for_method(cfg)
+    base = stored.copy()
+    ev0 = _q_evidence_from_first_column(base[:, 0], cfg)
+    if np.isfinite(ev0) and sign * ev0 >= guard:
+        return base
+
+    radius = max(0, int(cfg.q_integer_repair_radius))
+    if radius <= 0:
+        return base
+    a0, b0 = int(base[1, 0]), int(base[2, 0])
+    offsets = [(da*da + db*db, da, db)
+               for da in range(-radius, radius + 1)
+               for db in range(-radius, radius + 1)
+               if da or db]
+    offsets.sort(key=lambda z: z[0])
+
+    fallback = base
+    best_margin = sign * ev0 if np.isfinite(ev0) else -math.inf
+    for _cost, da, db in offsets:
+        aa = int(np.clip(a0 + da, 0, 255))
+        bb = int(np.clip(b0 + db, 0, 255))
+        if aa == a0 and bb == b0:
+            continue
+        col = base[:, 0].astype(np.float64).copy()
+        col[1], col[2] = aa, bb
+        ev = _q_evidence_from_first_column(col, cfg)
+        if not np.isfinite(ev):
+            continue
+        margin = sign * ev
+        if margin > best_margin:
+            best_margin = margin
+            fallback = base.copy()
+            fallback[1, 0], fallback[2, 0] = aa, bb
+        if margin >= guard:
+            out = base.copy()
+            out[1, 0], out[2, 0] = aa, bb
+            return out
+    return fallback
+
+
+def _close_r_integer_block(stored: np.ndarray, bit: int, cfg: MethodConfig) -> np.ndarray:
+    """Re-embed an R carrier after uint8 rounding until its clean decision is safe."""
+    if cfg.method not in R_METHODS:
+        return stored
+    sign = 1.0 if int(bit) else -1.0
+    out = stored.copy()
+    for _ in range(max(0, int(cfg.closure_rounds))):
+        try:
+            ev = float(extract_qr_evidence(out.astype(np.float64), cfg))
+        except Exception:
+            ev = 0.0
+        if np.isfinite(ev) and sign * ev >= _closure_guard_for_method(cfg):
+            break
+        try:
+            fb, _ = embed_qr_block(out.astype(np.float64), bit, cfg)
+            nxt = _stored_block(fb)
+        except Exception:
+            break
+        if np.array_equal(nxt, out):
+            break
+        out = nxt
+    return out
+
+
 def embed_array(host_img: np.ndarray, watermark_binary: np.ndarray, cfg: MethodConfig = MethodConfig(), collect_diagnostics: bool = True) -> EmbeddingResult:
     validate_config(cfg)
     t0 = time.perf_counter()
@@ -709,7 +1017,8 @@ def embed_array(host_img: np.ndarray, watermark_binary: np.ndarray, cfg: MethodC
             f"Insufficient determinant-valid blocks: {len(eligible)} available, {required} required "
             f"for payload={payload_bits}, repeat={repeat}."
         )
-    ordered = chaotic_permute_positions(eligible, cfg.private_key)
+    selected, stability_scores, drift_ref = _stability_select_blocks(channel, eligible, required, cfg)
+    ordered = chaotic_permute_positions(selected, cfg.private_key)
 
     out_channel = channel.copy()
     rows: List[int] = []
@@ -721,13 +1030,15 @@ def embed_array(host_img: np.ndarray, watermark_binary: np.ndarray, cfg: MethodC
         bit = int(bits[bit_index])
         original = channel[rr:rr + bs, cc:cc + bs].copy()
         try:
-            float_block, carrier_delta = embed_qr_block(original, bit, cfg)
+            block_cfg = _adaptive_block_cfg(cfg, stability_scores.get((rr, cc), 0.0), drift_ref)
+            float_block, carrier_delta = embed_qr_block(original, bit, block_cfg)
             stored = _stored_block(float_block)
-            if not determinant_valid(stored, cfg.det_eps):
-                # preserve the deterministic coordinate list: keep original if the
-                # quantized candidate becomes singular, but record zero evidence.
-                stored = original.astype(np.uint8)
-                carrier_delta = 0.0
+            # The stored uint8 block, not the pre-rounding Q/R factors, is what
+            # the decoder sees.  Repair only in that stored domain.
+            if cfg.method in Q_METHODS:
+                stored = _repair_q_integer_carrier(stored, bit, block_cfg)
+            else:
+                stored = _close_r_integer_block(stored, bit, block_cfg)
         except (FloatingPointError, ValueError, np.linalg.LinAlgError, OverflowError):
             stored = original.astype(np.uint8)
             carrier_delta = 0.0
@@ -744,6 +1055,8 @@ def embed_array(host_img: np.ndarray, watermark_binary: np.ndarray, cfg: MethodC
                 "carrier_delta": float(carrier_delta),
                 "pixel_l2": float(np.linalg.norm(stored.astype(np.float64) - original)),
                 "pixel_max_abs": float(np.max(np.abs(stored.astype(np.float64) - original))),
+                "stability_drift": float(stability_scores.get((rr, cc), 0.0)),
+                "stability_drift_ref": float(drift_ref),
             })
 
     output = host_img.copy()
@@ -758,6 +1071,7 @@ def embed_array(host_img: np.ndarray, watermark_binary: np.ndarray, cfg: MethodC
         "wm_size": np.asarray([cfg.wm_size], dtype=np.int32),
         "method": np.asarray([cfg.method]),
         "strength": np.asarray([strength_value(cfg)], dtype=np.float64),
+        "block_selection": np.asarray([cfg.block_selection]),
     }
     return EmbeddingResult(output, side_info, diagnostics, time.perf_counter() - t0)
 
@@ -786,7 +1100,7 @@ def _extract_from_channel(channel: np.ndarray, side_info: Dict[str, np.ndarray],
 
     for t, (rr, cc) in enumerate(zip(rows, cols)):
         block = channel[int(rr):int(rr) + bs, int(cc):int(cc) + bs].astype(np.float64)
-        if block.shape != (bs, bs) or not determinant_valid(block, cfg.det_eps):
+        if block.shape != (bs, bs):
             continue
         try:
             ev = float(extract_qr_evidence(block, cfg))
@@ -813,12 +1127,191 @@ def _extract_from_channel(channel: np.ndarray, side_info: Dict[str, np.ndarray],
     return wm, confidence, valid_obs
 
 
+
+# ----- Optional carrier-conformity self-synchronisation --------------------
+
+def _sync_evidence_score(ev: float, cfg: MethodConfig) -> float:
+    if not np.isfinite(ev):
+        return 0.0
+    a = abs(float(ev))
+    if cfg.method in {"q_smm", "q_npm", "q_lrm"}:
+        g = max(_closure_guard_for_method(cfg), cfg.eps)
+        return float(min(a / g, 1.0))
+    # Periodic Q/R carriers are embedded near evidence +/-1.  A score based on
+    # closeness to |e|=1 is far more selective than raw |e| on random blocks.
+    return float(max(0.0, 1.0 - min(abs(a - 1.0), 1.0)))
+
+
+def _sync_score_channel(
+    channel: np.ndarray,
+    side_info: Dict[str, np.ndarray],
+    cfg: MethodConfig,
+    dy: int = 0,
+    dx: int = 0,
+) -> float:
+    rows = side_info["rows"].astype(np.int32)
+    cols = side_info["cols"].astype(np.int32)
+    bs = int(side_info.get("block_size", np.asarray([cfg.block_size]))[0])
+    stride = max(1, int(cfg.sync_sample_stride))
+    vals: List[float] = []
+    for ii in range(0, len(rows), stride):
+        rr, cc = int(rows[ii]) + int(dy), int(cols[ii]) + int(dx)
+        if rr < 0 or cc < 0 or rr + bs > channel.shape[0] or cc + bs > channel.shape[1]:
+            continue
+        block = channel[rr:rr+bs, cc:cc+bs].astype(np.float64)
+        try:
+            if cfg.method in Q_METHODS:
+                ev = _q_evidence_from_first_column(block[:, 0], cfg)
+            else:
+                ev = extract_qr_evidence(block, cfg)
+        except (ValueError, np.linalg.LinAlgError, FloatingPointError, OverflowError):
+            continue
+        vals.append(_sync_evidence_score(float(ev), cfg))
+    return float(np.mean(vals)) if vals else 0.0
+
+
+def _warp_channel_rotation(channel: np.ndarray, angle_deg: float) -> np.ndarray:
+    h, w = channel.shape[:2]
+    m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), float(angle_deg), 1.0)
+    return cv2.warpAffine(channel, m, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+
+
+def _warp_channel_scale(channel: np.ndarray, scale: float) -> np.ndarray:
+    h, w = channel.shape[:2]
+    m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), 0.0, float(scale))
+    return cv2.warpAffine(channel, m, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+
+
+def _extract_from_channel_offset(
+    channel: np.ndarray,
+    side_info: Dict[str, np.ndarray],
+    cfg: MethodConfig,
+    dy: int,
+    dx: int,
+) -> Tuple[np.ndarray, float, int]:
+    # Same decoder as _extract_from_channel, but sample the known payload blocks
+    # at one globally shifted coordinate grid.
+    cfg = _config_from_side_info(cfg, side_info)
+    rows = side_info["rows"].astype(np.int32)
+    cols = side_info["cols"].astype(np.int32)
+    payload_bits = int(side_info.get("payload_bits", np.asarray([cfg.wm_size * cfg.wm_size]))[0])
+    wm_size = int(side_info.get("wm_size", np.asarray([cfg.wm_size]))[0])
+    bs = int(side_info.get("block_size", np.asarray([cfg.block_size]))[0])
+    arnold_iter = int(side_info.get("arnold_iter", np.asarray([cfg.arnold_iter]))[0])
+    sums = np.zeros(payload_bits, dtype=np.float64)
+    abs_sums = np.zeros(payload_bits, dtype=np.float64)
+    counts = np.zeros(payload_bits, dtype=np.int32)
+    valid_obs = 0
+    for t, (rr0, cc0) in enumerate(zip(rows, cols)):
+        rr, cc = int(rr0) + int(dy), int(cc0) + int(dx)
+        if rr < 0 or cc < 0 or rr + bs > channel.shape[0] or cc + bs > channel.shape[1]:
+            continue
+        block = channel[rr:rr+bs, cc:cc+bs].astype(np.float64)
+        try:
+            ev = float(extract_qr_evidence(block, cfg))
+        except (ValueError, np.linalg.LinAlgError, FloatingPointError, OverflowError):
+            continue
+        if not np.isfinite(ev):
+            continue
+        if not cfg.soft_vote:
+            ev = 1.0 if ev >= 0.0 else -1.0
+        k = t % payload_bits
+        sums[k] += ev; abs_sums[k] += abs(ev); counts[k] += 1; valid_obs += 1
+    valid = counts > 0
+    bits = np.zeros(payload_bits, dtype=np.uint8)
+    bits[valid] = (sums[valid] >= 0.0).astype(np.uint8)
+    bit_conf = np.zeros(payload_bits, dtype=np.float64)
+    bit_conf[valid] = np.abs(sums[valid]) / (abs_sums[valid] + cfg.eps)
+    confidence = float(np.mean(bit_conf[valid])) if np.any(valid) else 0.0
+    wm_scrambled = (bits.reshape(wm_size, wm_size) * 255).astype(np.uint8)
+    return invert_arnold_transform(wm_scrambled, arnold_iter), confidence, valid_obs
+
+
+def _auto_sync_channel(
+    channel: np.ndarray,
+    side_info: Dict[str, np.ndarray],
+    cfg: MethodConfig,
+) -> Tuple[np.ndarray, int, int, str, float, float]:
+    base_score = _sync_score_channel(channel, side_info, cfg)
+    best_score = base_score
+    best_kind, best_a, best_b = "base", 0.0, 0.0
+    best_channel = channel
+
+    # Integer translation: first search a coarse grid, then refine by one pixel.
+    rad = max(0, int(cfg.sync_translation_radius))
+    step = max(1, int(cfg.sync_translation_step))
+    coarse_best = (best_score, 0, 0)
+    for dy in range(-rad, rad + 1, step):
+        for dx in range(-rad, rad + 1, step):
+            if dy == 0 and dx == 0:
+                continue
+            sc = _sync_score_channel(channel, side_info, cfg, dy, dx)
+            if sc > coarse_best[0]:
+                coarse_best = (sc, dy, dx)
+    if coarse_best[0] > best_score:
+        _, cy, cx = coarse_best
+        for dy in range(max(-rad, cy - 1), min(rad, cy + 1) + 1):
+            for dx in range(max(-rad, cx - 1), min(rad, cx + 1) + 1):
+                sc = _sync_score_channel(channel, side_info, cfg, dy, dx)
+                if sc > best_score:
+                    best_score, best_kind, best_a, best_b = sc, "shift", float(dy), float(dx)
+
+    # Small rotation correction.
+    rmax = max(0.0, float(cfg.sync_rotation_deg))
+    rstep = max(0.25, float(cfg.sync_rotation_step_deg))
+    if rmax > 0:
+        angles = np.arange(-rmax, rmax + 0.5*rstep, rstep)
+        rot_best = (best_score, 0.0, channel)
+        for a in angles:
+            if abs(float(a)) < 1e-12:
+                continue
+            warped = _warp_channel_rotation(channel, float(a))
+            sc = _sync_score_channel(warped, side_info, cfg)
+            if sc > rot_best[0]:
+                rot_best = (sc, float(a), warped)
+        if rot_best[0] > best_score:
+            best_score, best_kind, best_a, best_b, best_channel = rot_best[0], "rotation", rot_best[1], 0.0, rot_best[2]
+
+    # Center-scale correction covers center-crop + resize attacks without pilots.
+    smin = float(np.clip(cfg.sync_scale_min, 0.5, 1.0))
+    sstep = max(0.005, float(cfg.sync_scale_step))
+    scales = np.arange(smin, 1.0 + 0.5*sstep, sstep)
+    scale_best = (best_score, 1.0, channel)
+    for scale in scales:
+        if abs(float(scale) - 1.0) < 1e-12:
+            continue
+        warped = _warp_channel_scale(channel, float(scale))
+        sc = _sync_score_channel(warped, side_info, cfg)
+        if sc > scale_best[0]:
+            scale_best = (sc, float(scale), warped)
+    if scale_best[0] > best_score:
+        best_score, best_kind, best_a, best_b, best_channel = scale_best[0], "scale", scale_best[1], 0.0, scale_best[2]
+
+    accept = best_score >= float(cfg.sync_accept_score) and best_score >= base_score * float(cfg.sync_accept_ratio)
+    if not accept:
+        return channel, 0, 0, "base", base_score, base_score
+    if best_kind == "shift":
+        return channel, int(round(best_a)), int(round(best_b)), "shift", base_score, best_score
+    return best_channel, 0, 0, best_kind, base_score, best_score
+
+
 def extract_array(watermarked: np.ndarray, side_info: Dict[str, np.ndarray], cfg: MethodConfig = MethodConfig()) -> ExtractionResult:
     t0 = time.perf_counter()
+    cfg2 = _config_from_side_info(cfg, side_info)
     channel = watermarked[:, :, 0].astype(np.float64)
-    wm, conf, valid = _extract_from_channel(channel, side_info, cfg)
-    method = str(side_info.get("method", np.asarray([cfg.method]))[0])
-    return ExtractionResult(wm, conf, DISPLAY_NAMES.get(method, method), valid, time.perf_counter() - t0)
+    sync_note = ""
+    if cfg2.sync_mode == "auto":
+        synced, dy, dx, kind, base_sc, best_sc = _auto_sync_channel(channel, side_info, cfg2)
+        if kind == "shift":
+            wm, conf, valid = _extract_from_channel_offset(synced, side_info, cfg2, dy, dx)
+        else:
+            wm, conf, valid = _extract_from_channel(synced, side_info, cfg2)
+        if kind != "base":
+            sync_note = f"+sync:{kind}"
+    else:
+        wm, conf, valid = _extract_from_channel(channel, side_info, cfg2)
+    method = str(side_info.get("method", np.asarray([cfg2.method]))[0])
+    return ExtractionResult(wm, conf, DISPLAY_NAMES.get(method, method) + sync_note, valid, time.perf_counter() - t0)
 
 
 def save_side_info(path: str | os.PathLike[str], side_info: Dict[str, np.ndarray]) -> None:
@@ -908,7 +1401,11 @@ def save_config_json(path: str | os.PathLike[str], cfg: MethodConfig) -> None:
 
 
 def _cli_cfg(args: argparse.Namespace) -> MethodConfig:
-    cfg = MethodConfig(method=args.method, private_key=args.key, repetition_override=args.repeat)
+    cfg = MethodConfig(
+        method=args.method, private_key=args.key, repetition_override=args.repeat,
+        block_selection=getattr(args, "selection", "stability"),
+        sync_mode=getattr(args, "sync", "none"),
+    )
     if args.strength is not None:
         cfg = with_strength(cfg, args.strength)
     return cfg
@@ -959,6 +1456,8 @@ def make_parser() -> argparse.ArgumentParser:
         sp.add_argument("--strength", type=float)
         sp.add_argument("--repeat", type=int, default=1)
         sp.add_argument("--key", default="KB123")
+        sp.add_argument("--selection", choices=("stability", "chaotic"), default="stability")
+        sp.add_argument("--sync", choices=("none", "auto"), default="none")
     e = sub.add_parser("embed"); common(e)
     e.add_argument("--host", required=True); e.add_argument("--watermark", required=True)
     e.add_argument("--output", required=True); e.add_argument("--side-info", required=True)

@@ -60,12 +60,14 @@ def main() -> None:
     ap.add_argument("--strength", type=float, default=None)
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--key", default="KB123")
+    ap.add_argument("--selection", choices=("stability", "chaotic"), default="stability")
+    ap.add_argument("--sync", choices=("none", "auto"), default="none")
     ap.add_argument("--out", type=Path, default=Path("validation/attack_suite.csv"))
     ap.add_argument("--hosts", default="")
     ap.add_argument("--watermarks", default="")
     args = ap.parse_args()
 
-    cfg = MethodConfig(method=args.method, repetition_override=args.repeat, private_key=args.key)
+    cfg = MethodConfig(method=args.method, repetition_override=args.repeat, private_key=args.key, block_selection=args.selection, sync_mode=args.sync)
     if args.strength is not None: cfg = with_strength(cfg, args.strength)
     hosts, wms = find_data(args.repo)
     if args.hosts:

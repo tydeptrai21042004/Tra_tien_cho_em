@@ -84,8 +84,11 @@ def choose_attacks(profile: str, screening: bool) -> Dict[str, object]:
     return chosen
 
 
-def configs_for_method(method: str, sweep: bool, repeat: int, key: str) -> List[MethodConfig]:
-    base = MethodConfig(method=method, repetition_override=repeat, private_key=key)
+def configs_for_method(method: str, sweep: bool, repeat: int, key: str, selection: str, sync: str) -> List[MethodConfig]:
+    base = MethodConfig(
+        method=method, repetition_override=repeat, private_key=key,
+        block_selection=selection, sync_mode=sync,
+    )
     if not sweep:
         return [base]
     return [with_strength(base, s) for s in method_strength_grid(method)]
@@ -203,6 +206,9 @@ def main() -> None:
     ap.add_argument("--quick", action="store_true", help="First host + first watermark + screening attacks")
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--key", default="KB123")
+    ap.add_argument("--selection", choices=("stability", "chaotic"), default="stability")
+    ap.add_argument("--sync", choices=("none", "auto"), default="none",
+                    help="Optional carrier-conformity geometric self-synchronisation")
     ap.add_argument("--min-psnr", type=float, default=50.0)
     ap.add_argument("--min-clean-nc", type=float, default=0.999999)
     args = ap.parse_args()
@@ -231,7 +237,7 @@ def main() -> None:
         for wm_path in wms:
             wm = load_binary_watermark(str(wm_path), 64)
             for method in methods:
-                for cfg in configs_for_method(method, args.sweep, args.repeat, args.key):
+                for cfg in configs_for_method(method, args.sweep, args.repeat, args.key, args.selection, args.sync):
                     try:
                         result_rows = run_one(host, wm, cfg, attacks)
                         for r in result_rows:

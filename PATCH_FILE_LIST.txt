@@ -1,25 +1,29 @@
-REPLACE:
-  proposal_method.py
-  attacks.py
-  run_attack_suite.py
-  run_ablation.py   (compatibility wrapper; old ablation logic removed)
-  README_RUN.md
-  ATTACKS_AND_ABLATIONS.md
+ROBUST-V3 CHANGE-ONLY PATCH
 
-ADD:
-  run_candidate_comparison.py
-  run_strength_screen.py
-  smoke_test_10_methods.py
+REPLACE / ADD IN REPOSITORY ROOT:
+- proposal_method.py
+- run_candidate_comparison.py
+- run_strength_screen.py
+- run_attack_suite.py
+- smoke_test_10_methods.py
+- attacks.py
+- run_ablation.py
+- README_RUN.md
+- README_ROBUST_V3.md
+- ATTACKS_AND_ABLATIONS.md
+- REMOVE_OLD_FILES.txt
 
-DELETE FROM OLD REPOSITORY:
-  run_branch_position_justification.py
-  validation_sample/branch_counts.csv
-  validation_sample/branch_feature_summary.csv
-  validation_sample/branch_position_report.txt
-  validation_sample/branch_position_summary.csv
-  validation_sample/branch_spatial_grid.csv
-  validation_sample/ablation_quick.csv
-  validation_sample/ablation_quick_summary.csv
-  validation_sample/ablation_quick_delta_vs_full.csv
+REMOVE AS OBSOLETE OLD ADAPTIVE-Q/R ARTIFACTS:
+- run_branch_position_justification.py
+- validation_sample/branch_counts.csv
+- validation_sample/branch_feature_summary.csv
+- validation_sample/branch_position_report.txt
+- validation_sample/branch_position_summary.csv
+- validation_sample/branch_spatial_grid.csv
+- validation_sample/ablation_quick.csv
+- validation_sample/ablation_quick_summary.csv
+- validation_sample/ablation_quick_delta_vs_full.csv
 
-The old branch-position/branch-count outputs refer to the removed adaptive Q/R method and must not be reused as evidence for the new candidates.
+Core carriers remain the same ten Q-only/R-only methods. Robust-v3 adds only
+bit-independent carrier-stability selection, normalized margin allocation,
+stored-domain closure, and optional carrier-conformity geometric sync.

@@ -1,26 +1,44 @@
-# Candidate comparison and later ablation
+# Attacks, candidate comparison, and ablation protocol
 
-## Candidate stage
+## Candidate phase
 
-The ten methods are **competing proposal formulations**, not components of one adaptive Q/R method. Run all methods with the same data and `repeat=1`.
+The ten Q-only/R-only methods are competing carrier formulations, not ablations.  Use the same hosts, watermarks, 4x4 QR blocks, payload, secret key, repeat=1, attacks, metrics, and feasibility thresholds.
 
-Suggested selection order:
+Run the carrier comparison with:
 
-1. require mean PSNR > 50 dB;
-2. require clean NC = 1 where possible;
-3. maximize hard-attack mean NC;
-4. then maximize global attacked mean NC;
-5. use worst-attack NC and BER as tie-breakers.
+```bash
+python run_candidate_comparison.py --sweep --profile representative \
+  --selection stability --sync none \
+  --min-psnr 50 --min-clean-nc 0.999999
+```
 
-`run_candidate_comparison.py --sweep --screening` uses a compact first-stage set including clean, JPEG, noise, blur, scaling and crop. After selecting one or two strengths per method, use the extended/stress profiles.
+Use `--sync none` to decide the carrier so the ranking is not dominated by a decoder-side geometric search.
+
+## Robust-system phase
+
+After selecting a carrier, evaluate the same carrier with optional self-synchronisation:
+
+```bash
+python run_attack_suite.py --method q_smm --strength <chosen> \
+  --profile extended --selection stability --sync auto
+```
+
+Report core/no-sync and sync-enabled results separately.
 
 ## Geometric attacks
 
-The attack module now keeps round-trip rotation/translation only as interpolation diagnostics and also provides true one-way rotations/translations. One-way geometry is an unsynchronised attack; do not label a round-trip attack as ordinary rotation robustness.
+`rotation_*_roundtrip` and `translation_*_roundtrip` are interpolation/degradation diagnostics.  `rotation_once_*` and `translation_once_*` are true unsynchronised geometric attacks.  Center crop + resize is also a coordinate-desynchronising attack.
 
-## Ablation stage
+Robust-v3 `--sync auto` searches only small global translation, rotation, and center scale using carrier conformity.  It does not add a second embedding band or pilot pattern.
 
-Do **not** use the deleted adaptive-branch ablations. After the winning carrier is known, create an ablation around that specific method. Examples:
+## Ablation phase
 
-- Q winner: remove normalization/guard, replace Givens update with a simpler update, compare angular/lattice formulation, then study repetition separately.
-- R winner: compare projection vectors, direct single-coefficient QIM, repeated row observations, normalized/relative feature, then study repetition separately.
+Only after one carrier wins should its components be ablated.  For Q-SMM, useful ablations are:
+
+- stability selection vs keyed chaotic subset;
+- host-normalized margin boost on/off;
+- stored-domain guard 0.2 vs robust guard;
+- `--sync none` vs `--sync auto` (system-level, not carrier novelty);
+- optional repeat>1 only as a separate system experiment.
+
+Do not resurrect the removed `q44/r44` adaptive branch as an ablation of the new method.
