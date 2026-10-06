@@ -1,0 +1,10 @@
+Validation performed in the supplied repository before packaging:
+- Python syntax compilation passed for all added Python files.
+- Existing repository data were used for smoke/quick execution.
+- DWT-Normalized-Difference Spread-QIM quick example on airplane/watermark_1 at S=0.025:
+  clean NC = 1.0000, PSNR ~= 52.47 dB.
+  Pilot synchronization correctly recovered the tested +3 degree rotation,
+  +4/+4 translation, and 10% crop-resize in that quick run.
+- JPEG Q50 and Gaussian-noise robustness remain the main bottlenecks at this
+  low-distortion point; therefore the runner includes a strength sweep and does
+  not claim NC>0.90 unless the measured full-run summary actually reaches it.

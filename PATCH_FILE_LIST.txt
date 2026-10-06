@@ -1,29 +1,6 @@
-ROBUST-V3 CHANGE-ONLY PATCH
-
-REPLACE / ADD IN REPOSITORY ROOT:
-- proposal_method.py
-- run_candidate_comparison.py
-- run_strength_screen.py
-- run_attack_suite.py
-- smoke_test_10_methods.py
-- attacks.py
-- run_ablation.py
-- README_RUN.md
-- README_ROBUST_V3.md
-- ATTACKS_AND_ABLATIONS.md
-- REMOVE_OLD_FILES.txt
-
-REMOVE AS OBSOLETE OLD ADAPTIVE-Q/R ARTIFACTS:
-- run_branch_position_justification.py
-- validation_sample/branch_counts.csv
-- validation_sample/branch_feature_summary.csv
-- validation_sample/branch_position_report.txt
-- validation_sample/branch_position_summary.csv
-- validation_sample/branch_spatial_grid.csv
-- validation_sample/ablation_quick.csv
-- validation_sample/ablation_quick_summary.csv
-- validation_sample/ablation_quick_delta_vs_full.csv
-
-Core carriers remain the same ten Q-only/R-only methods. Robust-v3 adds only
-bit-independent carrier-stability selection, normalized margin allocation,
-stored-domain closure, and optional carrier-conformity geometric sync.
+robust_transform_method.py
+run_high_robust_candidates.py
+smoke_test_high_robust.py
+README_HIGH_ROBUST.md
+APPLY_PATCH.py
+PATCH_FILE_LIST.txt
